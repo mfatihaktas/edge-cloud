@@ -1,353 +1,263 @@
-import collections
-# import concurrent.futures
-from operator import itemgetter
+import simpy
 
-class Task():
-	def __init__(self, _id, jobId, reqedResCap, servTime, k, type_=None):
+from debug_utils import *
+
+class Job():
+	def __init__(self, _id, serv_time, typ='job', priority=False):
 		self._id = _id
-		self.jobId = jobId
-		self.reqedResCap = reqedResCap
-		self.servTime = servTime
-		self.k = k
-		self.type_ = type_
-
-		self.remServTime = None
-		self.prev_hop_id = None
-		self.binding_time = None
-		self.run_time = None
+		self.serv_time = serv_time
+		self.typ = typ
+		self.priority = priority
 
 	def __repr__(self):
-		return "Task[id= {}, jobId= {}, remServTime= {}]".format(self._id, self.jobId, self.remServTime)
+		return "Job[id= {}, serv_time= {}, typ= {}, priority= {}]".format(self._id, self.serv_time, self.typ, self.priority)
 
-class Job(object):
-	def __init__(self, _id, k, n, reqedResCap, lifetime):
-		self._id = _id
-		self.k = k
-		self.n = n
-		self.reqedResCap = reqedResCap
-		self.lifetime = lifetime
-
-		self.wait_time = None
+class ProbeJob(Job):
+	def __init__(self, _id, src_id):
+		super().__init__(_id, serv_time=0, typ='probe')
+		self.src_id = src_id
 
 	def __repr__(self):
-		return "Job[id= {}, k= {}, reqedResCap= {}, lifetime= {}]".format(self._id, self.k, self.reqedResCap, self.lifetime)
+		return "ProbeJob[id= {}]".format(self._id)
 
 class JobGen(object):
-	def __init__(self, env, ar, reqedResCap_rv, servTime_rv, k_rv, out, **kwargs):
+	def __init__(self, env, interarr_time_rv, serv_time_rv, out, **kwargs):
 		self.env = env
-		self.ar = ar
-		self.reqedResCap_rv = reqedResCap_rv
-		self.servTime_rv = servTime_rv
-		self.k_rv = k_rv
+		self.interarr_time_rv = interarr_time_rv
+		self.serv_time_rv = serv_time_rv
 		self.out = out
 
-		self.numJobsSent = 0
+		self.num_jobs_sent = 0
 
-		self.action = self.env.process(self.run_poisson() )
-
-	def run_poisson(self):
-		while 1:
-			yield self.env.timeout(random.expovariate(self.ar) )
-			self.numJobsSent += 1
-			k = self.k_rv.sample()
-			self.out.put(
-				Job(_id = self.numJobsSent,
-						k = k, n = k,
-						reqed = self.reqedResCap_rv.sample(),
-						lifetime = self.servTime_rv.sample() ) )
-
-def map_to_key__val_l(m):
-	m = collections.OrderedDict(sorted(m.items() ) )
-	k_l, v_l = [], []
-	for k, v in m.items():
-		k_l.append(k)
-		v_l.append(v)
-	return k_l, v_l
-
-class Worker():
-	def __init__(self, env, _id, cap, out_c, straggle_m):
-		self.env = env
-		self._id = _id
-		self.cap = cap
-		self.out_c = out_c
-		self.straggle_m = straggle_m
-
-		self.t_l = []
-		self.got_busy = None
-		self.sinterrupt = None
-		self.add_to_serv = False
-		self.cancel = False
-		self.cancel_jid = None
-		env.process(self.run() )
-
-		self.sl = self.straggle_m['slowdown']
-		self.t_load_m = {}
+		self.action = self.env.process(self.run())
 
 	def __repr__(self):
-		return "Worker[id= {}]".format(self._id)
-
-	def sched_cap(self):
-		if len(self.t_l) == 0:
-			return 0
-		return sum([t.reqed for t in self.t_l] )
-
-	def nonsched_cap(self):
-		return self.cap - self.sched_cap()
-
-	def sched_load(self):
-		return self.sched_cap()/self.cap
-
-	def avg_load(self):
-		t_load_m = collections.OrderedDict(sorted(self.t_load_m.items() ) )
-		load_weighted_sum = 0
-		_t, t, _load = 0, 1, 0
-		for t, load in t_load_m.items():
-			load_weighted_sum += (t - _t)*_load
-			_t, _load = t, load
-		return load_weighted_sum/t
+		return "JobGen[interarr_time_rv= {}, serv_time_rv= {}]".format(self.interarr_time_rv, self.serv_time_rv)
 
 	def run(self):
-		while True:
-			if len(self.t_l) == 0:
-				time_gotidle = self.env.now
-				self.got_busy = self.env.event()
-				yield (self.got_busy)
-				self.got_busy = None
-				slog(DEBUG, self.env, self, "got busy!", None)
+		while 1:
+			yield self.env.timeout(self.interarr_time_rv.sample())
 
-				self.t_load_m[time_gotidle] = 0
-				self.t_load_m[self.env.now] = 0
+			self.num_jobs_sent += 1
+			self.out.put(Job(_id = self.num_jobs_sent,
+											 serv_time = self.serv_time_rv.sample()))
 
-			remServTime_l = [t.remServTime for t in self.t_l]
-			serv_time = min(remServTime_l)
-			i_min = remServTime_l.index(serv_time)
-			slog(DEBUG, self.env, self, "back to serv; serv_time= {}".format(serv_time), self.t_l[i_min] )
-			start_t = self.env.now
-
-			self.t_load_m[self.env.now] = self.sched_load()
-			self.sinterrupt = self.env.event()
-			yield (self.sinterrupt | self.env.timeout(serv_time) )
-			serv_time_ = self.env.now - start_t
-			if self.add_to_serv:
-				for t in self.t_l[:-1]:
-					t.remServTime -= serv_time_
-			else:
-				for t in self.t_l:
-					t.remServTime -= serv_time_
-			#
-			if self.add_to_serv:
-				slog(DEBUG, self.env, self, "new task added to serv", None)
-				self.sinterrupt = None
-				self.add_to_serv = False
-			elif self.cancel:
-				for t in self.t_l:
-					if t.jid == self.cancel_jid:
-						slog(DEBUG, self.env, self, "cancelled task in serv", t)
-						self.t_l.remove(t)
-						break
-				self.sinterrupt = None
-				self.cancel = False
-			else:
-				t = self.t_l.pop(i_min)
-				slog(DEBUG, self.env, self, "serv done", t)
-
-				t.run_time = self.env.now - t.binding_time
-				t.prev_hop_id = self._id
-				self.out_c.put_c(t)
-				slog(DEBUG, self.env, self, "finished", t)
-
-	def put(self, t):
-		slog(DEBUG, self.env, self, "put:: starting;", t)
-		avail_cap = self.nonsched_cap()
-		if t.type_ == 's' and t.reqed > avail_cap:
-			tred_l = [t for t in self.t_l if t.type_ == 'r']
-			i = 0
-			while i < len(tred_l) and avail_cap < t.reqed:
-				tred = tred_l[i]
-				avail_cap += tred.reqed
-				self.t_l.remove(tred)
-				i += 1
-			if avail_cap < t.reqed:
-				slog(ERROR, self.env, self, "could not bind", t)
-				return
-		elif t.type_ == 'r' and t.reqed > avail_cap:
-			return
-
-		_l = len(self.t_l)
-		t.binding_time = self.env.now
-		t.remServTime = t.lifetime*self.sl(self.sched_load() )
-		self.t_l.append(t)
-		if _l == 0:
-			self.got_busy.succeed()
-		else:
-			self.add_to_serv = True
-			self.sinterrupt.succeed()
-		slog(DEBUG, self.env, self, "binded, njob= {}".format(len(self.t_l) ), t)
-
-	def put_c(self, m):
-		slog(DEBUG, self.env, self, "received", m)
-		if m['message'] == 'remove':
-			self.cancel = True
-			self.cancel_jid = m['jid']
-			self.sinterrupt.succeed()
-		else:
-			log(ERROR, "Unrecognized message;", m=m)
-
-class Cluster():
-	def __init__(self, env, njob, nworker, wcap, straggle_m, scher, **kwargs):
+class Q(object):
+	def __init__(self, _id, env):
+		self._id = _id
 		self.env = env
-		self.njob = njob
-		self.nworker = nworker
-		self.wcap = wcap
-		self.straggle_m = straggle_m
-		self.scher = scher
 
-		self.w_l = [Worker(env, i, wcap, self, straggle_m) for i in range(nworker) ]
+class FCFS(Q): # First Come First Serve
+	def __init__(self, _id, env, out, speed=1):
+		super().__init__(_id, env)
+		self.out = out
+		self.speed = speed
 
 		self.store = simpy.Store(env)
-		env.process(self.run() )
+		self.customer_l = []
+		self.priority_customer_l = []
 
-		self.njob_finished = 0
-		self.store_c = simpy.Store(env)
-		self.wait_for_alljobs = env.process(self.run_c() )
+		self.action = env.process(self.run())
 
-		self.jobId_task_l_m = {}
-		self.jobId_info_m = {}
+		self.busy_time = 0
+		self.idle_time = 0
 
-	def __repr__(self):
-		return 'Cluster'
+		self.num_served = 0
+		self.avg_wait_time = 0
+
+	def load(self):
+		return self.busy_time / (self.busy_time + self.idle_time)
+
+	def put(self, customer):
+		slog(DEBUG, self.env, self, "recved", customer)
+		customer.arrival_time = self.env.now
+		if customer.priority:
+			self.priority_customer_l.append(customer)
+		else:
+			self.customer_l.append(customer)
+
+		return self.store.put(customer._id)
 
 	def run(self):
 		while True:
-			j = yield self.store.get()
+			idle_start = self.env.now
+			yield self.store.get()
+			self.idle_time += self.env.now - idle_start
 
-			while True:
-				j.wait_time = self.env.now - j.arrival_time
+			customer = self.priority_customer_l.pop(0) if (len(self.priority_customer_l) > 0) else self.customer_l.pop(0)
 
-				w_l = self.scher.schedule(j, self.w_l)
-				if w_l is None:
-					slog(DEBUG, self.env, self, "w_l is None", j)
-					yield self.env.timeout(0.01)
-				else:
-					break
+			wait_time = self.env.now - customer.arrival_time
+			self.avg_wait_time = (self.avg_wait_time * self.num_served + wait_time) / (self.num_served + 1)
 
-			self.jobId_info_m[j._id] = {'wait_time': self.env.now - j.arrival_time}
-			wid_l = []
-			for i, w in enumerate(w_l):
-				type_ = 's' if i < j.k else 'r'
-				w.put(Task(i+1, j._id, j.reqed, j.lifetime, j.k, type_) )
-				yield self.env.timeout(0.0001)
-				wid_l.append(w._id)
+			busy_start = self.env.now
+			t = customer.serv_time / self.speed
+			slog(DEBUG, self.env, self, "will serve for t= {}".format(t), customer)
+			yield self.env.timeout(t)
+			slog(DEBUG, self.env, self, "done serving", customer)
+			self.num_served += 1
+			self.busy_time += self.env.now - busy_start
 
-			self.jobId_task_l_m[j._id] = []
-			self.jobId_info_m[j._id].update({'expected_run_time': j.lifetime,
-																		 'workerId_l': wid_l})
+	def sendoff(self, customer):
+		self.out.put(customer)
 
-	def put(self, j):
-		slog(DEBUG, self.env, self, "received", j)
-		j.arrival_time = self.env.now
-		return self.store.put(j)
+class PacketQ(FCFS):
+	def __init__(self, _id, env, out, speed=1):
+		super().__init__(_id, env, out, speed)
 
-	def run_c(self):
+	def __repr__(self):
+		return "PacketQ[_id= {}]".format(self._id)
+
+class JobQ(FCFS):
+	def __init__(self, _id, env, out, speed=1):
+		super().__init__(_id, env, out, speed)
+
+	def __repr__(self):
+		return "JobQ[_id= {}]".format(self._id)
+
+	def sendoff(self, job):
+		if job.typ == 'probe':
+			self.net.put(ProbePacket())
+		elif job.typ == 'job':
+			self.out.put(customer)
+
+class Sink():
+	def __init__(self, _id, env, num_jobs):
+		self._id = _id
+		self.env = env
+		self.num_jobs = num_jobs
+
+		self.store = simpy.Store(env)
+		self.num_jobsRecvedSoFar = 0
+
+		self.wait_forAllJobs = env.process(self.run())
+
+	def __repr__(self):
+		return "Sink[_id= {}, num_jobs= {}]".format(self._id, self.num_jobs)
+
+	def put(self, job):
+		slog(DEBUG, self.env, self, "recved, num_jobsRecvedSoFar= {}".format(self.num_jobsRecvedSoFar), job)
+		return self.store.put(job)
+
+	def run(self):
 		while True:
-			t = yield self.store_c.get()
-			try:
-				self.jobId_task_l_m[t.jid].append(t)
-			except KeyError: # may happen due to a task completion after the corresponding job finishes
-				continue
+			job = yield self.store.get()
 
-			t_l = self.jobId_task_l_m[t.jid]
-			if len(t_l) > t.k:
-				log(ERROR, "len(t_l)= {} > k= {}".format(len(t_l), t.k) )
-			elif len(t_l) < t.k:
-				continue
+			self.num_jobsRecvedSoFar += 1
+			if self.num_jobsRecvedSoFar >= self.num_jobs:
+				return
+
+class Packet():
+	def __init__(self, _id, src_id, dst_id, payload, typ, priority=False):
+		self._id = _id
+		self.src_id = src_id
+		self.dst_id = dst_id
+		self.payload = payload
+		self.typ = typ
+		self.priority = priority
+
+	def __repr__(self):
+		return "Packet[id= {}, src_id= {}, dst_id= {}, typ= {}, priority= {}]".format(self._id, self.src_id, self.dst_id, self.typ, self.priority)
+
+class ProbePacket(Packet):
+	def __init__(self, src_id, dst_id, job):
+		super().__init__(job._id, src_id, dst_id, payload=job, typ='probe')
+
+	def __repr__(self):
+		return "ProbePacket[id= {}, src_id= {}, dst_id= {}]".format(self._id, self.src_id, self.dst_id)
+
+class Network():
+	def __init__(self, _id, env):
+		self._id = _id
+		self.env = env
+
+		self.dst_id__q_m = {}
+
+	def __repr__(self):
+		return "Network[_id= {}]".format(self._id)
+
+	def add_dst(self, dst):
+		num_dsts = len(self.dst_id__q_m)
+		self.dst_id__q_m[dst._id] = FCFS(_id='netQ{}'.format(num_dsts), self.env, speed=1, out=dst)
+		log(DEBUG, "Added", dst=dst)
+
+	def put(self, packet):
+		slog(DEBUG, self.env, self, "recved", packet)
+		check(packet.dst_id in self.dst_id__q_m, "All packets should have a destination.")
+		self.dst_id__q_m[packet.dst_id].put(packet)
+
+class EdgeCloud():
+	def __init__(self, _id, env, net, out, peer_edgecloud_id_l=None):
+		self._id = _id
+		self.env = env
+		self.net = net
+		self.peer_edgecloud_id_l = peer_edgecloud_id_l
+
+		# TODO: Should ideally be a G/G/n
+		self.q = JobQ(_id, env, out)
+
+		self.id_job_m = {}
+
+	def __repr__(self):
+		return "EdgeCloud[_id= {}]".format(self._id)
+
+	def put(self, packet):
+		check(packet.dst_id == self._id, "Packet arrived to wrong edge-cloud.")
+
+		if packet.typ == 'probe':
+			slog(DEBUG, self.env, self, "recved back probe", packet)
+			if packet.job_id in self.id_job_m:
+				job = self.id_job_m[packet.job_id]
+				slog(DEBUG, self.env, self, "will send back the job", job)
+				del self.id_job_m[packet.job_id]
+
+				p = Packet(packet.job_id, src_id=self._id, dst_id=packet.src_id, payload=job, typ='job', priority=True)
+				self.net.put(p)
 			else:
-				t_l = self.jobId_task_l_m[t.jid]
-				workerId_recvedFrom_l = [t.prev_hop_id for t in t_l]
-				workerId_sentTo_l = self.jobId_info_m[t.jid]['workerId_l']
-				for w in self.w_l:
-					if w._id in workerId_sentTo_l and w._id not in workerId_recvedFrom_l:
-						w.put_c({'message': 'remove', 'jid': t.jid} )
+				slog(DEBUG, self.env, self, "already sent the job", packet)
+		elif packet.typ == 'job':
+			job = packet.payload
+			slog(DEBUG, self.env, self, "recved", job)
 
-				self.jobId_info_m[t.jid].update({
-					'fate': 'finished',
-					'run_time': max([t.run_time for t in self.jobId_task_l_m[t.jid] ] ) } )
-				self.jobId_task_l_m.pop(t.jid, None)
-				slog(DEBUG, self.env, self, "finished jid= {}".format(t.jid), t)
+			if self.peer_edgecloud_id_l is None:
+				return self.put_local(job)
+			else:
+				return self.put_wProbing(job)
+		else:
+			assert_("Unexpected packet.typ= {}".format(packet.typ))
 
-				## This causes (s1, a1, r1), (s2, a2, r2) to be interleaved by more than one job
-				# self.njob_finished += 1
-				# blog(njob_finished=self.njob_finished)
-				# if self.njob_finished >= self.njob:
-				#   return
+	def put_local(self, job):
+		return self.q.put(job)
 
-				if t.jid <= self.njob:
-					self.njob_finished += 1
-					# log(WARNING, "job completion;", jid=t.jid, njob=self.njob, njob_finished=self.njob_finished)
-					if self.njob_finished >= self.njob:
-						return
+	def put_wProbing(self, job):
+		slog(DEBUG, self.env, self, "recved", job)
 
-	def put_c(self, t):
-		slog(DEBUG, self.env, self, "received", t)
-		return self.store_c.put(t)
+		job = packet.payload
+		self.id_job_m[job._id] = job
 
-class Mapper(object):
-	def __init__(self, mapping_m):
-		self.mapping_m = mapping_m
+		pj = ProbeJob(job._id, src_id=self._id)
+		self.put_local(pj)
 
-		if self.mapping_m['type'] == 'packing':
-			self.get_worker_l = lambda j, w_l: self.get_worker_l_w_packing(j, w_l)
-		elif self.mapping_m['type'] == 'spreading':
-			self.get_worker_l = lambda j, w_l: self.get_worker_l_w_spreading(j, w_l)
+		for peer_id in self.peer_edgecloud_id_l:
+			probe = ProbePacket(src_id=self._id, dst_id=peer_id, job=pj)
+			self.net.put(probe)
 
-	def __repr__(self):
-		return 'Mapper[mapping_m= {}]'.format(self.mapping_m)
+class Controller():
+	def __init__(self, _id, env, cloud_l):
+		self._id = _id
+		self.env = env
+		self.cloud_l = cloud_l
 
-	def get_worker_l_w_packing(self, job, w_l):
-		w_l_ = []
-		for w in w_l:
-			if job.reqed <= w.nonsched_cap():
-				w_l_.append(w)
-		return w_l_
-
-	def get_worker_l_w_spreading(self, job, w_l):
-		w_load_l = []
-		for w in w_l:
-			if job.reqed <= w.nonsched_cap():
-				w_load_l.append((w, w.sched_load() ) )
-		w_load_l.sort(key=itemgetter(1) )
-		return [w for w, _ in w_load_l]
-
-class Scheduler(object):
-	def __init__(self, mapping_m, sching_m):
-		self.sching_m = sching_m
-		self.mapper = Mapper(mapping_m)
-
-		self._type = 'Scheduler'
-		self._id = 'Scheduler_a={}'.format(sching_m['a'] )
-		self.s_len = 1
-
-		if sching_m['type'] == 'plain':
-			self.schedule = self.plain
-		elif sching_m['type'] == 'expand_if_totaldemand_leq':
-			self.schedule = self.expand_if_totaldemand_leq
+class Controller_wProbing(Controller):
+	def __init__(self, _id, env, cloud_l):
+		super().__init__(_id, env, cloud_l)
 
 	def __repr__(self):
-		return 'Scheduler[sching_m={}, mapper= {}]'.format(self.sching_m, self.mapper)
+		return "Controller_wProbing[_id= {}]".format(self._id)
 
-	def plain(self, j, w_l, expand_job=False):
-		w_l = self.mapper.get_worker_l(j, w_l)
-		if len(w_l) < j.k:
-			return None
+	def put(self, job):
+		slog(DEBUG, self.env, self, "recved", job)
 
-		j.n = j.k
-		if expand_job:
-			j.n = int(j.n + self.sching_m['job_expansion_factor'])
+		i = self.to_which_q(job)
+		check(i < len(self.q_l), "i= {} should have been < len(q_l)= {}".format(i, len(self.q_l)))
 
-		return w_l[:j.n] if len(w_l) >= j.n else None
-
-	def expand_if_totaldemand_leq(self, j, w_l):
-		D = j.k*j.reqed*j.lifetime
-
-		expand = True if D < self.sching_m['threshold'] else False
-		return self.plain(j, w_l, expand)
+		return self.q_l[i].put(job)

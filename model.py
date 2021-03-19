@@ -58,11 +58,13 @@ Job service times S ~ Exp(1)
 Job transmission times X ~ Exp(1)
 """
 def EW_edge_markovian(edgeId_info_l, S, X):
+	log(DEBUG, "started;", edgeId_info_l=edgeId_info_l)
+
 	N = len(edgeId_info_l) # number of edge clouds
 	check(N > 1, "There needs to be at least two edge clouds.")
 
 	edge0Info_m = edgeId_info_l[0]
-	check('edgeId_schingProb_m' in edge0Info_m, "Info for the overloaded edge node should contain the inter-edge scheduling probabilities.")
+	check('toEdgeId_probSching_m' in edge0Info_m, "Info for the overloaded edge node should contain the inter-edge scheduling probabilities.")
 	edgeId_probSchingTo_m = edge0Info_m['toEdgeId_probSching_m']
 
 	ar_edge0 = edge0Info_m['ar']
@@ -90,16 +92,23 @@ def EW_edge_markovian(edgeId_info_l, S, X):
 
 		if i == 0:
 			check('toEdgeId_latency_m' in edge0Info_m, "Info for the overloaded edge node should contain the inter-edge latencies.")
-			edgeId_latency_m = edge0Info_m['toEdgeId_latency_m']
-			edgeId_probSchingTo_m = edge0Info_m['toEdgeId_probSching_m']
+			toEdgeId_latency_m = edge0Info_m['toEdgeId_latency_m']
+			toEdgeId_probSching_m = edge0Info_m['toEdgeId_probSching_m']
 			for j in range(1, N):
-				ar_toEdgeId = edgeId_probSchingTo_m[i] * ar
-				ENetDelay = 2*edgeId_latency_m[i] + ET_MG1(ar_toEdgeId, X)
+				ar_toEdgeId = toEdgeId_probSching_m[j] * ar
+				ENetDelay = 2*toEdgeId_latency_m[j] + ET_MG1(ar_toEdgeId, X)
 				toEdgeId_delayInfo_m[j] = {'ar': ar_toEdgeId, 'EDelay': ENetDelay + EW}
 
 		edgeId_toEdgeId_delayInfo_m[i] = toEdgeId_delayInfo_m
-
 	log(DEBUG, "", edgeId_toEdgeId_delayInfo_m=edgeId_toEdgeId_delayInfo_m)
+
+	EDelay = 0
+	ar_total = sum(edgeId_info_l[i]['ar'] for i in range(N))
+	for i in range(N):
+		for j, delayInfo_m in edgeId_toEdgeId_delayInfo_m[i].items():
+		EDelay += delayInfo_m['ar']/ar_total * delayInfo_m['EDelay']
+
+	return EDelay
 
 if __name__ == "__main__":
 	N, Cap = 10, 10
@@ -109,9 +118,10 @@ if __name__ == "__main__":
 	r = 1
 
 	S = Exp(1)
+	X = Exp(1)
 	edgeId_info_l = [
 		{
-			'ar': ar_MGc_forAGivenRo(ro=0.9, c=10, S=S, Sl=BZipf(1, 1)),
+			'ar': ar_MGc_forAGivenRo(ro=0.3, c=10, S=S, Sl=BZipf(1, 1)),
 			'c': 10,
 			'toEdgeId_probSching_m': {1: 0.2},
 			'toEdgeId_latency_m': {1: 20}
@@ -122,4 +132,5 @@ if __name__ == "__main__":
 		}
 	]
 
-	EW_edge_markovian(edgeId_info_l, S, X)
+	EW = EW_edge_markovian(edgeId_info_l, S, X)
+	log(DEBUG, "EW= {}".format(EW))
